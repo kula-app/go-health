@@ -13,11 +13,11 @@ import (
 func newPassingEngine(t *testing.T) *core.Engine {
 	t.Helper()
 	e := core.NewEngine("svc", "desc")
-	e.RegisterReadyCheck(core.Check{
+	e.RegisterReadinessCheck(core.Check{
 		Name: "critical", ComponentType: "datastore",
 		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
-	e.RegisterCheck(core.Check{
+	e.RegisterHealthCheck(core.Check{
 		Name: "informational", ComponentType: "datastore",
 		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
@@ -48,7 +48,7 @@ func TestLivezHandler_passReturns200(t *testing.T) {
 
 func TestReadyzHandler_failReturns503(t *testing.T) {
 	e := core.NewEngine("svc", "desc")
-	e.RegisterReadyCheck(core.Check{
+	e.RegisterReadinessCheck(core.Check{
 		Name: "broken", ComponentType: "datastore",
 		Run: func(ctx context.Context) []core.Result {
 			return []core.Result{{Status: core.StatusFail, Output: "boom"}}

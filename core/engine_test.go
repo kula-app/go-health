@@ -36,9 +36,9 @@ func TestNewEngine_withLogger(t *testing.T) {
 	}
 }
 
-func TestRegisterCheck_putsInHealthzOnly(t *testing.T) {
+func TestRegisterHealthCheck_putsInHealthzOnly(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{Name: "foo", ComponentType: "system"})
+	e.RegisterHealthCheck(Check{Name: "foo", ComponentType: "system"})
 
 	if len(e.healthz) != 1 {
 		t.Errorf("healthz len = %d, want 1", len(e.healthz))
@@ -46,11 +46,14 @@ func TestRegisterCheck_putsInHealthzOnly(t *testing.T) {
 	if len(e.readyz) != 0 {
 		t.Errorf("readyz len = %d, want 0", len(e.readyz))
 	}
+	if len(e.livez) != 0 {
+		t.Errorf("livez len = %d, want 0", len(e.livez))
+	}
 }
 
-func TestRegisterReadyCheck_putsInBothSets(t *testing.T) {
+func TestRegisterReadinessCheck_putsInReadyzAndHealthz(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterReadyCheck(Check{Name: "foo", ComponentType: "system"})
+	e.RegisterReadinessCheck(Check{Name: "foo", ComponentType: "system"})
 
 	if len(e.healthz) != 1 {
 		t.Errorf("healthz len = %d, want 1", len(e.healthz))
@@ -58,12 +61,30 @@ func TestRegisterReadyCheck_putsInBothSets(t *testing.T) {
 	if len(e.readyz) != 1 {
 		t.Errorf("readyz len = %d, want 1", len(e.readyz))
 	}
+	if len(e.livez) != 0 {
+		t.Errorf("livez len = %d, want 0", len(e.livez))
+	}
 }
 
-func TestRegisterCheck_copiesValue(t *testing.T) {
+func TestRegisterLivenessCheck_putsInAllThreeSets(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterLivenessCheck(Check{Name: "foo", ComponentType: "system"})
+
+	if len(e.healthz) != 1 {
+		t.Errorf("healthz len = %d, want 1", len(e.healthz))
+	}
+	if len(e.readyz) != 1 {
+		t.Errorf("readyz len = %d, want 1", len(e.readyz))
+	}
+	if len(e.livez) != 1 {
+		t.Errorf("livez len = %d, want 1", len(e.livez))
+	}
+}
+
+func TestRegisterHealthCheck_copiesValue(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	c := Check{Name: "foo", ComponentType: "system"}
-	e.RegisterCheck(c)
+	e.RegisterHealthCheck(c)
 
 	// Mutating c after registration must not affect what Engine holds.
 	c.Name = "mutated"
@@ -72,31 +93,53 @@ func TestRegisterCheck_copiesValue(t *testing.T) {
 	}
 }
 
-func TestRegisterCheck_rejectsReservedSystemTime(t *testing.T) {
+func TestRegisterHealthCheck_rejectsReservedSystemTime(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic when registering reserved name 'system:time'")
 		}
 	}()
-	e.RegisterCheck(Check{Name: "system:time", ComponentType: "system"})
+	e.RegisterHealthCheck(Check{Name: "system:time", ComponentType: "system"})
 }
 
-func TestRegisterReadyCheck_rejectsReservedSystemTime(t *testing.T) {
+func TestRegisterReadinessCheck_rejectsReservedSystemTime(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic when registering reserved name 'system:time'")
 		}
 	}()
-	e.RegisterReadyCheck(Check{Name: "system:time", ComponentType: "system"})
+	e.RegisterReadinessCheck(Check{Name: "system:time", ComponentType: "system"})
 }
 
-func TestRunLivez_alwaysPassesWithSystemTime(t *testing.T) {
+func TestRegisterLivenessCheck_rejectsReservedSystemTime(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when registering reserved name 'system:time'")
+		}
+	}()
+	e.RegisterLivenessCheck(Check{Name: "system:time", ComponentType: "system"})
+}
+
+// TestRunLivez_ignoresReadinessAndHealthChecks verifies the scoping
+// contract for the liveness endpoint: only checks registered via
+// RegisterLivenessCheck appear in the response, and checks registered
+// for readiness or health alone do not. This is what protects pods
+// from cascade-restart when a non-liveness check fails.
+func TestRunLivez_ignoresReadinessAndHealthChecks(t *testing.T) {
 	e := NewEngine("svc-id", "my service")
 	// Register checks that would fail if executed. Livez must ignore them.
-	e.RegisterReadyCheck(Check{
-		Name:          "would-fail",
+	e.RegisterReadinessCheck(Check{
+		Name:          "would-fail-ready",
+		ComponentType: "system",
+		Run: func(ctx context.Context) []Result {
+			return []Result{{Status: StatusFail, Output: "should not run"}}
+		},
+	})
+	e.RegisterHealthCheck(Check{
+		Name:          "would-fail-health",
 		ComponentType: "system",
 		Run: func(ctx context.Context) []Result {
 			return []Result{{Status: StatusFail, Output: "should not run"}}
@@ -112,7 +155,7 @@ func TestRunLivez_alwaysPassesWithSystemTime(t *testing.T) {
 		t.Errorf("ServiceId = %q, want svc-id", resp.ServiceId)
 	}
 	if len(resp.Checks) != 1 {
-		t.Errorf("len(Checks) = %d, want 1 (only system:time)", len(resp.Checks))
+		t.Errorf("len(Checks) = %d, want 1 (only system:time); got keys=%v", len(resp.Checks), keys(resp.Checks))
 	}
 	if _, ok := resp.Checks["system:time"]; !ok {
 		t.Error("missing system:time entry")
@@ -125,13 +168,81 @@ func TestRunLivez_alwaysPassesWithSystemTime(t *testing.T) {
 	}
 }
 
-func TestRunReadyz_runsOnlyReadyChecks(t *testing.T) {
+// TestRunLivez_runsLivenessChecks verifies that a check registered via
+// RegisterLivenessCheck does appear on RunLivez, and that its failure
+// propagates to the aggregated response status (which becomes 503 at
+// the HTTP layer and triggers a pod restart at kubelet).
+func TestRunLivez_runsLivenessChecks(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterLivenessCheck(Check{
+		Name:          "deadlock-watchdog",
+		ComponentType: "system",
+		Run: func(ctx context.Context) []Result {
+			return []Result{{Status: StatusFail, Output: "goroutine stuck"}}
+		},
+	})
+
+	resp := e.RunLivez(context.Background())
+
+	if resp.Status != StatusFail {
+		t.Errorf("Status = %q, want fail", resp.Status)
+	}
+	got, ok := resp.Checks["deadlock-watchdog"]
+	if !ok {
+		t.Fatal("missing deadlock-watchdog entry")
+	}
+	if len(got) != 1 || got[0].Status != StatusFail {
+		t.Errorf("deadlock-watchdog = %+v, want one failing entry", got)
+	}
+}
+
+// TestRegisterLivenessCheck_cascadesToReadyzAndHealthz verifies that a
+// liveness check also runs on /readyz and /healthz. The cascade is
+// deliberate: if liveness fails, readiness should also fail (drain the
+// pod immediately rather than wait for kubelet to restart it), and
+// /healthz must show the full picture.
+func TestRegisterLivenessCheck_cascadesToReadyzAndHealthz(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterLivenessCheck(Check{
+		Name:          "watchdog",
+		ComponentType: "system",
+		Run: func(ctx context.Context) []Result {
+			return []Result{{Status: StatusPass}}
+		},
+	})
+
+	for _, tc := range []struct {
+		name string
+		run  func(context.Context) HealthResponse
+	}{
+		{"readyz", e.RunReadyz},
+		{"healthz", e.RunHealthz},
+		{"livez", e.RunLivez},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := tc.run(context.Background())
+			if _, ok := resp.Checks["watchdog"]; !ok {
+				t.Errorf("%s should include watchdog (liveness check cascades to all endpoints)", tc.name)
+			}
+		})
+	}
+}
+
+func keys(m map[string][]ComponentStatus) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func TestRunReadyz_excludesHealthOnlyChecks(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterHealthCheck(Check{
 		Name: "informational", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
-	e.RegisterReadyCheck(Check{
+	e.RegisterReadinessCheck(Check{
 		Name: "critical", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
@@ -142,7 +253,7 @@ func TestRunReadyz_runsOnlyReadyChecks(t *testing.T) {
 		t.Error("readyz should include critical check")
 	}
 	if _, ok := resp.Checks["informational"]; ok {
-		t.Error("readyz should NOT include informational check")
+		t.Error("readyz should NOT include informational health-only check")
 	}
 	if _, ok := resp.Checks["system:time"]; !ok {
 		t.Error("readyz should include system:time")
@@ -151,11 +262,11 @@ func TestRunReadyz_runsOnlyReadyChecks(t *testing.T) {
 
 func TestRunHealthz_runsAllChecks(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "informational", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
-	e.RegisterReadyCheck(Check{
+	e.RegisterReadinessCheck(Check{
 		Name: "critical", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
@@ -190,8 +301,8 @@ func TestAggregation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			e := NewEngine("svc", "desc")
 			a, b := tt.a, tt.b
-			e.RegisterCheck(Check{Name: "a", ComponentType: "system", Run: func(ctx context.Context) []Result { return []Result{{Status: a}} }})
-			e.RegisterCheck(Check{Name: "b", ComponentType: "system", Run: func(ctx context.Context) []Result { return []Result{{Status: b}} }})
+			e.RegisterHealthCheck(Check{Name: "a", ComponentType: "system", Run: func(ctx context.Context) []Result { return []Result{{Status: a}} }})
+			e.RegisterHealthCheck(Check{Name: "b", ComponentType: "system", Run: func(ctx context.Context) []Result { return []Result{{Status: b}} }})
 			got := e.RunHealthz(context.Background()).Status
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
@@ -202,7 +313,7 @@ func TestAggregation(t *testing.T) {
 
 func TestRunHealthz_zeroesOutputOnPass(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "x", ComponentType: "system",
 		Run: func(ctx context.Context) []Result {
 			return []Result{{Status: StatusPass, Output: "leaked"}}
@@ -219,7 +330,7 @@ func TestRunHealthz_zeroesOutputOnPass(t *testing.T) {
 // component, even if the check producer mistakenly returns it.
 func TestRunHealthz_zeroesAffectedEndpointsOnPass(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "x", ComponentType: "system",
 		Run: func(ctx context.Context) []Result {
 			return []Result{{
@@ -240,7 +351,7 @@ func TestRunHealthz_zeroesAffectedEndpointsOnPass(t *testing.T) {
 // Cassandra-style multi-node case from RFC §4 / §5.
 func TestRunHealthz_multiSubComponent(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "cassandra:connections", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result {
 			return []Result{
@@ -276,7 +387,7 @@ func TestRunHealthz_multiSubComponent(t *testing.T) {
 // omitted from the response entirely.
 func TestRunHealthz_emptyResultsOmitsKey(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "nothing", ComponentType: "system",
 		Run: func(ctx context.Context) []Result { return nil },
 	})
@@ -294,7 +405,7 @@ func TestRunHealthz_emptyResultsOmitsKey(t *testing.T) {
 // appears with a descriptive Output rather than crashing the process.
 func TestRunHealthz_nilRunSurfacesAsFail(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{Name: "broken", ComponentType: "system"})
+	e.RegisterHealthCheck(Check{Name: "broken", ComponentType: "system"})
 	resp := e.RunHealthz(context.Background())
 	got := resp.Checks["broken"]
 	if len(got) != 1 {
@@ -310,7 +421,7 @@ func TestRunHealthz_nilRunSurfacesAsFail(t *testing.T) {
 
 func TestRunHealthz_appliesTimeout(t *testing.T) {
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "slow", ComponentType: "system",
 		Timeout: 50 * time.Millisecond,
 		Run: func(ctx context.Context) []Result {
@@ -334,7 +445,7 @@ func TestRunHealthz_parallelExecution(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	const checkDelay = 100 * time.Millisecond
 	for _, name := range []string{"a", "b"} {
-		e.RegisterCheck(Check{
+		e.RegisterHealthCheck(Check{
 			Name: name, ComponentType: "system",
 			Run: func(ctx context.Context) []Result {
 				time.Sleep(checkDelay)
@@ -354,7 +465,7 @@ func TestRunHealthz_parallelExecution(t *testing.T) {
 func TestRunHealthz_contextCancellationPropagates(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	started := make(chan struct{})
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "long-running", ComponentType: "system",
 		// No Timeout. Relies on the caller-provided context for cancellation.
 		Run: func(ctx context.Context) []Result {
@@ -382,7 +493,7 @@ func TestRunHealthz_contextCancellationPropagates(t *testing.T) {
 }
 
 // TestEndToEnd_toggleCriticalCheck wires an Engine with one
-// RegisterCheck stub (informational) and one RegisterReadyCheck stub
+// RegisterHealthCheck stub (informational) and one RegisterReadinessCheck stub
 // (critical) and exercises all three Run methods under two regimes:
 // first with both stubs passing, then with the critical stub flipped
 // to fail. The assertion is that RunLivez is never affected by either
@@ -396,11 +507,11 @@ func TestEndToEnd_toggleCriticalCheck(t *testing.T) {
 	var criticalStatus = StatusPass
 
 	e := NewEngine("svc", "desc")
-	e.RegisterCheck(Check{
+	e.RegisterHealthCheck(Check{
 		Name: "informational", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
-	e.RegisterReadyCheck(Check{
+	e.RegisterReadinessCheck(Check{
 		Name: "critical", ComponentType: "datastore",
 		Run: func(ctx context.Context) []Result {
 			return []Result{{Status: criticalStatus, Output: "boom"}}

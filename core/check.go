@@ -85,7 +85,7 @@ type Result struct {
 //	c := dbcheck.New(db)
 //	c.Name = "database:postgres-primary"
 //	c.Timeout = 5 * time.Second
-//	engine.RegisterReadyCheck(c)
+//	engine.RegisterReadinessCheck(c)
 //
 // The Engine takes a value copy when the check is registered. Mutating
 // the local Check value after registration has no effect on what the
@@ -99,7 +99,8 @@ type Check struct {
 	//
 	// The name "system:time" is reserved for the framework's implicit
 	// per-response heartbeat. Registering a Check with this name causes
-	// RegisterCheck and RegisterReadyCheck to panic.
+	// RegisterHealthCheck, RegisterReadinessCheck, and
+	// RegisterLivenessCheck to panic.
 	Name string
 
 	// ComponentType classifies the component being checked. Use one of

@@ -19,11 +19,11 @@ import (
 // register returns the router's default 404.
 func TestMount_registersAllThreeEndpoints(t *testing.T) {
 	eng := core.NewEngine("svc", "desc")
-	eng.RegisterReadyCheck(core.Check{
+	eng.RegisterReadinessCheck(core.Check{
 		Name: "critical", ComponentType: "datastore",
 		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
-	eng.RegisterCheck(core.Check{
+	eng.RegisterHealthCheck(core.Check{
 		Name: "informational", ComponentType: "datastore",
 		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
@@ -70,7 +70,7 @@ func TestMount_registersAllThreeEndpoints(t *testing.T) {
 // that kubelet relies on to drain traffic from a degraded pod.
 func TestMount_readyzFailReturns503(t *testing.T) {
 	eng := core.NewEngine("svc", "desc")
-	eng.RegisterReadyCheck(core.Check{
+	eng.RegisterReadinessCheck(core.Check{
 		Name: "critical", ComponentType: "datastore",
 		Run: func(ctx context.Context) []core.Result {
 			return []core.Result{{Status: core.StatusFail, Output: "down"}}

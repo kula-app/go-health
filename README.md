@@ -25,7 +25,7 @@ A small, reusable Go library for serving HTTP health-check endpoints that follow
 Most Go services end up reinventing the same three endpoints. `go-health` exists so you only build them once:
 
 - Every response is `application/health+json` per the RFC, so dashboards and uptime tooling already know how to read it.
-- `/livez` is process-local with no I/O, `/readyz` runs only the checks you mark critical for traffic, and `/healthz` is the comprehensive view. Liveness cannot cascade-restart your fleet because of a downstream blip.
+- Three registration scopes — liveness, readiness, health — map to the three Kubernetes probe semantics. The liveness scope is reserved for in-process signals so a downstream blip cannot cascade-restart your fleet; readiness drains traffic; health is the comprehensive dashboard view.
 - The core has no SDK dependencies and each built-in check lives in its own subpackage, so consumers only link the SDKs they actually use.
 - The engine returns plain Go structs and does not import `net/http`, so you can exercise it directly in tests without spinning up an HTTP server.
 
@@ -59,10 +59,10 @@ func mountHealth(mux *http.ServeMux, db *sql.DB, s3client *s3.Client, bucket str
     eng := core.NewEngine("my-service", "My Service API")
 
     // Critical for serving traffic. Appears on /readyz and /healthz.
-    eng.RegisterReadyCheck(dbcheck.New(db))
+    eng.RegisterReadinessCheck(dbcheck.New(db))
 
     // Informational only. Appears on /healthz.
-    eng.RegisterCheck(s3check.New(s3client, bucket))
+    eng.RegisterHealthCheck(s3check.New(s3client, bucket))
 
     mux.Handle("/livez",   healthhttp.LivezHandler(eng))
     mux.Handle("/readyz",  healthhttp.ReadyzHandler(eng))
@@ -74,17 +74,17 @@ That's the whole integration. Three checks: a database ping (critical), an S3 he
 
 ## Endpoints
 
-| Endpoint   | Purpose                        | Checks executed                                                                                         | Aggregate `fail` HTTP                               |
-| ---------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `/livez`   | "Should kubelet restart me?"   | Implicit `system:time` only                                                                             | 200 (no I/O, so cannot fail short of process death) |
-| `/readyz`  | "Can I accept traffic?"        | `system:time` + every check registered via `RegisterReadyCheck`                                         | 503 on any registered-readiness check fail          |
-| `/healthz` | "Comprehensive dashboard view" | `system:time` + every registered check (whether registered via `RegisterCheck` or `RegisterReadyCheck`) | 503 on any check fail                               |
+| Endpoint   | Purpose                        | Checks executed                                                                 | Aggregate `fail` HTTP                       |
+| ---------- | ------------------------------ | ------------------------------------------------------------------------------- | ------------------------------------------- |
+| `/livez`   | "Should kubelet restart me?"   | `system:time` + every check registered via `RegisterLivenessCheck`              | 503 on any liveness check fail              |
+| `/readyz`  | "Can I accept traffic?"        | `system:time` + every liveness check + every check via `RegisterReadinessCheck` | 503 on any liveness or readiness check fail |
+| `/healthz` | "Comprehensive dashboard view" | `system:time` + every registered check                                          | 503 on any check fail                       |
 
-All three return the same RFC schema. Only the set of checks executed differs.
+All three return the same RFC schema. Only the set of checks executed differs. Liveness checks cascade into readiness and health; readiness checks cascade into health; health-only checks (registered via `RegisterHealthCheck`) stay on `/healthz`.
 
-**Why `/livez` runs no registered checks.** Liveness probe failure restarts the pod. If `/livez` pings the DB and the DB has a transient hiccup, kubelet restarts every replica simultaneously. A downstream blip then cascades into a self-inflicted outage. Liveness must be process-local.
+**`/livez` is for in-process signals only.** Liveness probe failure restarts the pod. If `/livez` pings the DB and the DB has a transient hiccup, kubelet restarts every replica simultaneously and a downstream blip cascades into a self-inflicted outage. Use `RegisterLivenessCheck` only for things a restart can fix: deadlock detectors, goroutine-leak watchdogs, corrupt internal caches. External dependencies belong on `RegisterReadinessCheck`, which drains traffic from the affected replica instead of restarting it. When in doubt, prefer `RegisterReadinessCheck`.
 
-**Why `/readyz` skips informational checks.** Readiness failure drops the pod from the Service endpoints. Mark only checks that genuinely block serving traffic with `RegisterReadyCheck`; everything else (object stores, third-party APIs that you can degrade past) belongs on `/healthz`.
+**`/readyz` skips health-only checks.** Readiness failure drops the pod from the Service endpoints. Mark only checks that genuinely block serving traffic with `RegisterReadinessCheck` (or `RegisterLivenessCheck`, which cascades); everything else (object stores, third-party APIs that you can degrade past) belongs on `/healthz` via `RegisterHealthCheck`.
 
 **Why `/healthz` is the dashboard.** It is the human/observability endpoint, called rarely, so the cost of running every check is acceptable.
 
@@ -117,7 +117,7 @@ A SQL ping. Works with `*sql.DB` directly (which satisfies the package's `Pinger
 c := dbcheck.New(db)
 c.Name = "database:postgres"   // override defaults if you want
 c.Timeout = 5 * time.Second
-eng.RegisterReadyCheck(c)
+eng.RegisterReadinessCheck(c)
 ```
 
 `Run` returns `pass` when `PingContext` is nil-error, otherwise `fail` with the error message in `Output`.
@@ -127,7 +127,7 @@ eng.RegisterReadyCheck(c)
 A `HeadBucket` call against an `*s3.Client`. It verifies reachability and credentials in one cheap API call. It does not test write or delete permissions. IAM regressions on PUT or DELETE surface when real uploads fail rather than on the health endpoint.
 
 ```go
-eng.RegisterCheck(s3check.New(s3client, "my-bucket"))
+eng.RegisterHealthCheck(s3check.New(s3client, "my-bucket"))
 ```
 
 ## Writing custom checks
@@ -135,7 +135,7 @@ eng.RegisterCheck(s3check.New(s3client, "my-bucket"))
 `Check` is a struct, not an interface. Register a value with whatever `Run` closure you need:
 
 ```go
-eng.RegisterReadyCheck(core.Check{
+eng.RegisterReadinessCheck(core.Check{
     Name:          "queue:depth",
     ComponentType: "datastore",
     Timeout:       2 * time.Second,
@@ -164,7 +164,7 @@ eng.RegisterReadyCheck(core.Check{
 `Run` returns a slice because RFC §4 allows a single check key to report multiple sub-component instances. A replicated dependency (a Cassandra cluster, a Redis sentinel set) returns one `Result` per node, each with its own `ComponentId`:
 
 ```go
-eng.RegisterReadyCheck(core.Check{
+eng.RegisterReadinessCheck(core.Check{
     Name:          "cassandra:connections",
     ComponentType: "datastore",
     Run: func(ctx context.Context) []core.Result {

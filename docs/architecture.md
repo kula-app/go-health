@@ -34,33 +34,40 @@ Precedent: `prometheus/client_golang/promhttp` follows the same pattern (transpo
 
 Matches stdlib idioms (`http.Server`, `http.Client`). Three concrete benefits:
 
-- Post-construction customization is one line: `c.Timeout = 5 * time.Second; engine.RegisterReadyCheck(c)`. With an interface you would either have to wrap the value or re-implement the method set.
+- Post-construction customization is one line: `c.Timeout = 5 * time.Second; engine.RegisterReadinessCheck(c)`. With an interface you would either have to wrap the value or re-implement the method set.
 - No field-vs-method name collisions. Adding a future field is non-breaking; adding an interface method is.
 - No need for a `CheckerFunc` adapter type.
 
 The cost: `Check.Run` is a function field rather than a method. In practice this reads identically and trades slightly less type-system formality for a much smaller API surface.
 
-### Two registration methods, not functional options for the readyz toggle
+### Three registration methods, one per probe scope
 
-`RegisterCheck` (informational, healthz only) versus `RegisterReadyCheck` (critical, readyz + healthz) is a binary choice. A functional option (`RegisterCheck(c, WithReadyness())`) would be over-engineering for two states. Two methods are self-documenting at the call site:
+`RegisterLivenessCheck` (livez + readyz + healthz), `RegisterReadinessCheck` (readyz + healthz), and `RegisterHealthCheck` (healthz only) form a strict cascade: the more severe the probe, the smaller the set of checks that participates. A functional option (`Register(c, WithReadyness())`) would be over-engineering — three methods are self-documenting at the call site:
 
 ```go
-eng.RegisterReadyCheck(dbcheck.New(db))   // obvious: critical
-eng.RegisterCheck(s3check.New(c, bucket)) // obvious: informational
+eng.RegisterLivenessCheck(deadlockWatchdog)    // obvious: restart-worthy
+eng.RegisterReadinessCheck(dbcheck.New(db))    // obvious: drain-worthy
+eng.RegisterHealthCheck(s3check.New(c, bucket)) // obvious: dashboard-only
 ```
 
-If the option set ever grows beyond two states, the methods can be replaced with options non-breakingly (keep the methods as wrappers for one release).
+The cascade direction is deliberate: a liveness failure should also fail readiness (drain the pod immediately rather than wait for kubelet's next restart), and `/healthz` should show every check regardless of severity. The alternative — scope-independent sets where a liveness failure does not appear on `/healthz` — would let operators look at the dashboard during an incident and miss the most important signal.
 
-### `/livez` runs no I/O checks; `/readyz` skips informational checks
+### Probe semantics drive the registration choice
 
 Probe semantics in Kubernetes are not interchangeable:
 
-- Liveness probe failure restarts the pod. Running an I/O check on `/livez` means a transient downstream blip can restart every replica simultaneously — a downstream hiccup becomes a self-inflicted outage.
-- Readiness probe failure drops the pod from the Service endpoints. Running an informational check (e.g. an object store the service can degrade past) on `/readyz` means a non-critical dependency outage stops 100% of traffic landing.
+- **Liveness probe failure restarts the pod.** Running an I/O check via `RegisterLivenessCheck` means a transient downstream blip can restart every replica simultaneously — a downstream hiccup becomes a self-inflicted outage. The godoc on `RegisterLivenessCheck` warns explicitly. The method is reserved for in-process signals that a restart can fix: deadlock detectors, goroutine-leak watchdogs, corrupt internal caches.
+- **Readiness probe failure drops the pod from the Service endpoints.** Running a non-critical check via `RegisterReadinessCheck` (e.g. an object store the service can degrade past) means a non-critical dependency outage stops 100% of traffic landing. Such checks belong on `RegisterHealthCheck`.
 
 `/healthz` is the dashboard endpoint, called rarely by humans or observability tooling. Running every check there is acceptable at low request rates.
 
-This is why `RegisterCheck` exists at all — without it there would be no way to expose a check on `/healthz` without also gating traffic on it.
+`RegisterHealthCheck` exists so that a check can appear on the dashboard without also gating traffic on it. Without it, every observable check would have to gate readiness.
+
+### Liveness-check guidance is godoc-only
+
+`RegisterLivenessCheck` is foot-gun-shaped: misuse turns a transient downstream blip into a synchronized restart of every replica. The framework documents the risk prominently in the godoc but does not enforce it at compile or run time, because there is no programmatic way to distinguish "in-process check" from "external I/O check" — both are arbitrary `func(ctx) []Result` values. Forcing producers to declare their I/O nature would either be unverifiable metadata (easy to lie about) or a typed interface (which contradicts the [struct-with-public-fields choice](#check-is-a-struct-with-public-fields-not-an-interface)).
+
+We rely on the godoc warning surfacing in editor tooling at the moment a developer writes `eng.RegisterLivenessCheck(...)`. That covers the common case (writing the call site) without adding the runtime cost of inspecting every probe.
 
 ### S3 check is `HeadBucket`, not a write/read/delete round-trip
 
@@ -77,7 +84,7 @@ This matters because `Check` fields are mutable. A consumer can do:
 ```go
 c := dbcheck.New(db)
 c.Timeout = 5 * time.Second
-eng.RegisterReadyCheck(c)
+eng.RegisterReadinessCheck(c)
 ```
 
 If `Run` owned the timeout (built it into the closure at construction time), the override would silently not take effect. By the engine applying it, the override always wins.

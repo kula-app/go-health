@@ -3,7 +3,7 @@
 // The standard library's *sql.DB satisfies Pinger directly, so the
 // typical wiring is one line:
 //
-//	engine.RegisterReadyCheck(dbcheck.New(db))
+//	engine.RegisterReadinessCheck(dbcheck.New(db))
 //
 // The Pinger abstraction keeps this package free of any specific
 // database driver dependency, which means consumers using a wrapper
