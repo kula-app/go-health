@@ -98,6 +98,7 @@ github.com/kula-app/go-health
 │   └── httprouter/    # julienschmidt/httprouter mounters
 └── checks/
     ├── dbcheck/       # SQL ping
+    ├── redischeck/    # Redis ping (single node + cluster fan-out)
     └── s3check/       # S3 HeadBucket
 ```
 
@@ -121,6 +122,23 @@ eng.RegisterReadinessCheck(c)
 ```
 
 `Run` returns `pass` when `PingContext` is nil-error, otherwise `fail` with the error message in `Output`.
+
+### `checks/redischeck`
+
+A Redis `PING` against a [go-redis/v9](https://github.com/redis/go-redis) client. Two constructors cover the two common deployment shapes:
+
+```go
+// Single node (standalone, single master, or sentinel-managed failover client).
+eng.RegisterReadinessCheck(redischeck.New(rdb))
+
+// Redis Cluster: pings every shard (every master and every replica) and
+// produces one Result per node, each tagged with the node's address as
+// ComponentId. A partial cluster outage appears in the response as a
+// mix of pass and fail entries under the same check key.
+eng.RegisterReadinessCheck(redischeck.NewCluster(cluster))
+```
+
+The cluster check leverages the multi-result fan-out from RFC §4 so a single Cassandra-style entry can report N nodes. Engine aggregation is strict: any failing node fails the overall check. Services that can tolerate a degraded cluster should register the cluster check via `RegisterHealthCheck` instead, or wrap its `Run` with a quorum-based aggregator.
 
 ### `checks/s3check`
 
