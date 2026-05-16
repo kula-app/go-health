@@ -98,8 +98,10 @@ github.com/kula-app/go-health
 │   └── httprouter/    # julienschmidt/httprouter mounters
 └── checks/
     ├── dbcheck/       # SQL ping
+    ├── httpcheck/     # HTTP GET (2xx-3xx pass)
     ├── redischeck/    # Redis ping (single node + cluster fan-out)
-    └── s3check/       # S3 HeadBucket
+    ├── s3check/       # S3 HeadBucket
+    └── tcpcheck/      # TCP open-and-close reachability
 ```
 
 The package separates concerns into three layers:
@@ -147,6 +149,26 @@ A `HeadBucket` call against an `*s3.Client`. It verifies reachability and creden
 ```go
 eng.RegisterHealthCheck(s3check.New(s3client, "my-bucket"))
 ```
+
+### `checks/tcpcheck`
+
+A TCP reachability probe. Opens a connection to the configured `host:port` and closes it immediately on success — no banner read, no protocol handshake. Appropriate for endpoints whose application protocol the framework does not understand (Kafka brokers, custom RPC servers, sibling microservices without an HTTP health page).
+
+```go
+eng.RegisterReadinessCheck(tcpcheck.New("kafka-broker-0:9092"))
+```
+
+`Run` returns `pass` when the TCP handshake completes, otherwise `fail` with the underlying `net` error message in `Output` (which already distinguishes connection refused, host unreachable, and timeout).
+
+### `checks/httpcheck`
+
+An HTTP `GET` against a URL using a caller-supplied `*http.Client`. Any 2xx or 3xx response is `pass`; any 4xx, 5xx, or transport-level error (DNS failure, refused, TLS handshake, timeout) is `fail`.
+
+```go
+eng.RegisterReadinessCheck(httpcheck.New(http.DefaultClient, "https://api.example.com/health"))
+```
+
+Authentication, custom TLS, and proxy settings are delegated to the supplied client — the idiomatic shape is an auth-injecting `http.RoundTripper` installed on the client's `Transport`. The check is intentionally minimal: non-GET methods, request bodies, and response-body assertions are out of scope. For those cases write a custom `core.Check` inline.
 
 ## Writing custom checks
 
