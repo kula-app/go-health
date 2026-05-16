@@ -1,5 +1,21 @@
 # kula-app/go-health
 
+<div align="center">
+	<a href="https://github.com/kula-app/go-health/actions">
+		<img src="https://github.com/kula-app/go-health/actions/workflows/build.yml/badge.svg" alt="GitHub Actions">
+	</a>
+    <a href="https://github.com/kula-app/go-health/actions">
+		<img src="https://github.com/kula-app/go-health/actions/workflows/test.yml/badge.svg" alt="GitHub Actions">
+	</a>
+    <a href="https://pkg.go.dev/badge/github.com/kula-app/go-health">
+        <img src="https://pkg.go.dev/badge/github.com/kula-app/go-health.svg" alt="Go Reference">
+    </a>
+</div>
+
+<p align="center">
+    <sub>Created and maintained by <a href="https://github.com/philprime">Philip Niedertscheider</a> at <a href="https://github.com/kula-app">kula.app</a> and all the amazing <a href="https://github.com/kula-app/go-health/graphs/contributors">contributors</a>.</sub>
+</p>
+
 A small, reusable Go library for serving HTTP health-check endpoints that follow [RFC draft-inadarei-api-health-check-06](https://datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06).
 
 `go-health` gives you three transport-agnostic endpoints: `/livez`, `/readyz`, and `/healthz`. Their semantics align with the Kubernetes API server convention. The library also provides a check authoring API that lets you mix database, object-store, and arbitrary custom checks without locking your service into a particular HTTP router or check SDK.
