@@ -42,19 +42,25 @@ func TestNew_defaults(t *testing.T) {
 func TestRun_pass(t *testing.T) {
 	c := newWithHeader(&fakeHeader{}, "test-bucket")
 	r := c.Run(context.Background())
-	if r.Status != core.StatusPass {
-		t.Errorf("Status = %q, want pass", r.Status)
+	if len(r) != 1 {
+		t.Fatalf("len(r) = %d, want 1", len(r))
+	}
+	if r[0].Status != core.StatusPass {
+		t.Errorf("Status = %q, want pass", r[0].Status)
 	}
 }
 
 func TestRun_fail(t *testing.T) {
 	c := newWithHeader(&fakeHeader{err: errors.New("access denied")}, "test-bucket")
 	r := c.Run(context.Background())
-	if r.Status != core.StatusFail {
-		t.Errorf("Status = %q, want fail", r.Status)
+	if len(r) != 1 {
+		t.Fatalf("len(r) = %d, want 1", len(r))
 	}
-	if r.Output != "access denied" {
-		t.Errorf("Output = %q, want 'access denied'", r.Output)
+	if r[0].Status != core.StatusFail {
+		t.Errorf("Status = %q, want fail", r[0].Status)
+	}
+	if r[0].Output != "access denied" {
+		t.Errorf("Output = %q, want 'access denied'", r[0].Output)
 	}
 }
 
@@ -70,10 +76,13 @@ func TestRun_timeoutDeadlineExceeded(t *testing.T) {
 	defer cancel()
 
 	r := c.Run(ctx)
-	if r.Status != core.StatusFail {
-		t.Errorf("Status = %q, want fail", r.Status)
+	if len(r) != 1 {
+		t.Fatalf("len(r) = %d, want 1", len(r))
 	}
-	if !strings.Contains(r.Output, "deadline exceeded") {
-		t.Errorf("Output = %q, want it to contain 'deadline exceeded'", r.Output)
+	if r[0].Status != core.StatusFail {
+		t.Errorf("Status = %q, want fail", r[0].Status)
+	}
+	if !strings.Contains(r[0].Output, "deadline exceeded") {
+		t.Errorf("Output = %q, want it to contain 'deadline exceeded'", r[0].Output)
 	}
 }

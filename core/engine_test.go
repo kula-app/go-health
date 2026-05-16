@@ -98,8 +98,8 @@ func TestRunLivez_alwaysPassesWithSystemTime(t *testing.T) {
 	e.RegisterReadyCheck(Check{
 		Name:          "would-fail",
 		ComponentType: "system",
-		Run: func(ctx context.Context) Result {
-			return Result{Status: StatusFail, Output: "should not run"}
+		Run: func(ctx context.Context) []Result {
+			return []Result{{Status: StatusFail, Output: "should not run"}}
 		},
 	})
 
@@ -129,11 +129,11 @@ func TestRunReadyz_runsOnlyReadyChecks(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	e.RegisterCheck(Check{
 		Name: "informational", ComponentType: "datastore",
-		Run: func(ctx context.Context) Result { return Result{Status: StatusPass} },
+		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
 	e.RegisterReadyCheck(Check{
 		Name: "critical", ComponentType: "datastore",
-		Run: func(ctx context.Context) Result { return Result{Status: StatusPass} },
+		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
 
 	resp := e.RunReadyz(context.Background())
@@ -153,11 +153,11 @@ func TestRunHealthz_runsAllChecks(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	e.RegisterCheck(Check{
 		Name: "informational", ComponentType: "datastore",
-		Run: func(ctx context.Context) Result { return Result{Status: StatusPass} },
+		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
 	e.RegisterReadyCheck(Check{
 		Name: "critical", ComponentType: "datastore",
-		Run: func(ctx context.Context) Result { return Result{Status: StatusPass} },
+		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
 
 	resp := e.RunHealthz(context.Background())
@@ -190,8 +190,8 @@ func TestAggregation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			e := NewEngine("svc", "desc")
 			a, b := tt.a, tt.b
-			e.RegisterCheck(Check{Name: "a", ComponentType: "system", Run: func(ctx context.Context) Result { return Result{Status: a} }})
-			e.RegisterCheck(Check{Name: "b", ComponentType: "system", Run: func(ctx context.Context) Result { return Result{Status: b} }})
+			e.RegisterCheck(Check{Name: "a", ComponentType: "system", Run: func(ctx context.Context) []Result { return []Result{{Status: a}} }})
+			e.RegisterCheck(Check{Name: "b", ComponentType: "system", Run: func(ctx context.Context) []Result { return []Result{{Status: b}} }})
 			got := e.RunHealthz(context.Background()).Status
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
@@ -204,8 +204,8 @@ func TestRunHealthz_zeroesOutputOnPass(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	e.RegisterCheck(Check{
 		Name: "x", ComponentType: "system",
-		Run: func(ctx context.Context) Result {
-			return Result{Status: StatusPass, Output: "leaked"}
+		Run: func(ctx context.Context) []Result {
+			return []Result{{Status: StatusPass, Output: "leaked"}}
 		},
 	})
 	resp := e.RunHealthz(context.Background())
@@ -214,14 +214,108 @@ func TestRunHealthz_zeroesOutputOnPass(t *testing.T) {
 	}
 }
 
+// TestRunHealthz_zeroesAffectedEndpointsOnPass verifies the RFC §4.6
+// suppression rule: AffectedEndpoints must be absent from a passing
+// component, even if the check producer mistakenly returns it.
+func TestRunHealthz_zeroesAffectedEndpointsOnPass(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterCheck(Check{
+		Name: "x", ComponentType: "system",
+		Run: func(ctx context.Context) []Result {
+			return []Result{{
+				Status:            StatusPass,
+				AffectedEndpoints: []string{"/leaked"},
+			}}
+		},
+	})
+	resp := e.RunHealthz(context.Background())
+	if got := resp.Checks["x"][0].AffectedEndpoints; got != nil {
+		t.Errorf("AffectedEndpoints on pass = %v, want nil", got)
+	}
+}
+
+// TestRunHealthz_multiSubComponent verifies that a Check returning
+// multiple Results lands as multiple ComponentStatus entries under the
+// same map key, each carrying its own ComponentId. This is the
+// Cassandra-style multi-node case from RFC §4 / §5.
+func TestRunHealthz_multiSubComponent(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterCheck(Check{
+		Name: "cassandra:connections", ComponentType: "datastore",
+		Run: func(ctx context.Context) []Result {
+			return []Result{
+				{ComponentId: "node-1", Status: StatusPass, ObservedValue: 42, ObservedUnit: "connections"},
+				{ComponentId: "node-2", Status: StatusWarn, ObservedValue: 95, ObservedUnit: "connections", Output: "near pool limit"},
+			}
+		},
+	})
+
+	resp := e.RunHealthz(context.Background())
+
+	got := resp.Checks["cassandra:connections"]
+	if len(got) != 2 {
+		t.Fatalf("len(checks[cassandra:connections]) = %d, want 2", len(got))
+	}
+	if got[0].ComponentId != "node-1" || got[1].ComponentId != "node-2" {
+		t.Errorf("componentIds = %q,%q; want node-1,node-2", got[0].ComponentId, got[1].ComponentId)
+	}
+	if got[0].Status != StatusPass {
+		t.Errorf("node-1 status = %q, want pass", got[0].Status)
+	}
+	if got[1].Status != StatusWarn || got[1].Output != "near pool limit" {
+		t.Errorf("node-2 status/output = %q/%q, want warn/'near pool limit'", got[1].Status, got[1].Output)
+	}
+	// Aggregation: any warn (no fail) → overall warn.
+	if resp.Status != StatusWarn {
+		t.Errorf("overall status = %q, want warn", resp.Status)
+	}
+}
+
+// TestRunHealthz_emptyResultsOmitsKey verifies that a Check returning
+// an empty slice is interpreted as "nothing to report" and the key is
+// omitted from the response entirely.
+func TestRunHealthz_emptyResultsOmitsKey(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterCheck(Check{
+		Name: "nothing", ComponentType: "system",
+		Run: func(ctx context.Context) []Result { return nil },
+	})
+	resp := e.RunHealthz(context.Background())
+	if _, ok := resp.Checks["nothing"]; ok {
+		t.Error("empty Result slice should omit the key from response")
+	}
+	if resp.Status != StatusPass {
+		t.Errorf("overall status = %q, want pass (empty results contribute nothing)", resp.Status)
+	}
+}
+
+// TestRunHealthz_nilRunSurfacesAsFail verifies the engine's defense
+// against a half-built Check whose Run is nil: a single failing entry
+// appears with a descriptive Output rather than crashing the process.
+func TestRunHealthz_nilRunSurfacesAsFail(t *testing.T) {
+	e := NewEngine("svc", "desc")
+	e.RegisterCheck(Check{Name: "broken", ComponentType: "system"})
+	resp := e.RunHealthz(context.Background())
+	got := resp.Checks["broken"]
+	if len(got) != 1 {
+		t.Fatalf("len(checks[broken]) = %d, want 1", len(got))
+	}
+	if got[0].Status != StatusFail {
+		t.Errorf("status = %q, want fail", got[0].Status)
+	}
+	if got[0].Output == "" {
+		t.Error("nil-Run failure should have non-empty Output")
+	}
+}
+
 func TestRunHealthz_appliesTimeout(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	e.RegisterCheck(Check{
 		Name: "slow", ComponentType: "system",
 		Timeout: 50 * time.Millisecond,
-		Run: func(ctx context.Context) Result {
+		Run: func(ctx context.Context) []Result {
 			<-ctx.Done()
-			return Result{Status: StatusFail, Output: ctx.Err().Error()}
+			return []Result{{Status: StatusFail, Output: ctx.Err().Error()}}
 		},
 	})
 	start := time.Now()
@@ -242,9 +336,9 @@ func TestRunHealthz_parallelExecution(t *testing.T) {
 	for _, name := range []string{"a", "b"} {
 		e.RegisterCheck(Check{
 			Name: name, ComponentType: "system",
-			Run: func(ctx context.Context) Result {
+			Run: func(ctx context.Context) []Result {
 				time.Sleep(checkDelay)
-				return Result{Status: StatusPass}
+				return []Result{{Status: StatusPass}}
 			},
 		})
 	}
@@ -263,10 +357,10 @@ func TestRunHealthz_contextCancellationPropagates(t *testing.T) {
 	e.RegisterCheck(Check{
 		Name: "long-running", ComponentType: "system",
 		// No Timeout. Relies on the caller-provided context for cancellation.
-		Run: func(ctx context.Context) Result {
+		Run: func(ctx context.Context) []Result {
 			close(started)
 			<-ctx.Done()
-			return Result{Status: StatusFail, Output: ctx.Err().Error()}
+			return []Result{{Status: StatusFail, Output: ctx.Err().Error()}}
 		},
 	})
 
@@ -304,12 +398,12 @@ func TestEndToEnd_toggleCriticalCheck(t *testing.T) {
 	e := NewEngine("svc", "desc")
 	e.RegisterCheck(Check{
 		Name: "informational", ComponentType: "datastore",
-		Run: func(ctx context.Context) Result { return Result{Status: StatusPass} },
+		Run: func(ctx context.Context) []Result { return []Result{{Status: StatusPass}} },
 	})
 	e.RegisterReadyCheck(Check{
 		Name: "critical", ComponentType: "datastore",
-		Run: func(ctx context.Context) Result {
-			return Result{Status: criticalStatus, Output: "boom"}
+		Run: func(ctx context.Context) []Result {
+			return []Result{{Status: criticalStatus, Output: "boom"}}
 		},
 	})
 

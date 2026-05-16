@@ -15,11 +15,11 @@ func newPassingEngine(t *testing.T) *core.Engine {
 	e := core.NewEngine("svc", "desc")
 	e.RegisterReadyCheck(core.Check{
 		Name: "critical", ComponentType: "datastore",
-		Run: func(ctx context.Context) core.Result { return core.Result{Status: core.StatusPass} },
+		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
 	e.RegisterCheck(core.Check{
 		Name: "informational", ComponentType: "datastore",
-		Run: func(ctx context.Context) core.Result { return core.Result{Status: core.StatusPass} },
+		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
 	return e
 }
@@ -50,8 +50,8 @@ func TestReadyzHandler_failReturns503(t *testing.T) {
 	e := core.NewEngine("svc", "desc")
 	e.RegisterReadyCheck(core.Check{
 		Name: "broken", ComponentType: "datastore",
-		Run: func(ctx context.Context) core.Result {
-			return core.Result{Status: core.StatusFail, Output: "boom"}
+		Run: func(ctx context.Context) []core.Result {
+			return []core.Result{{Status: core.StatusFail, Output: "boom"}}
 		},
 	})
 	rec := httptest.NewRecorder()

@@ -153,6 +153,13 @@ func (e *Engine) systemTimeStatus() ComponentStatus {
 // check name. The framework's implicit "system:time" entry is always
 // included in the returned map alongside the requested checks.
 //
+// Each Check.Run produces a slice of Result values: a single-instance
+// dependency reports one observation, a replicated dependency reports
+// one observation per replica. All observations from one Check appear
+// under the Check's Name key in the returned map, matching the RFC's
+// per-component-array shape. A Check that returns an empty slice is
+// omitted from the response entirely.
+//
 // Parallel execution is unconditional. Even when only one check is
 // supplied, runChecks still launches a goroutine for it so that the
 // concurrency contract is uniform: a single slow check cannot block
@@ -171,7 +178,7 @@ func (e *Engine) runChecks(ctx context.Context, checks []Check) map[string][]Com
 		return out
 	}
 
-	results := make([]ComponentStatus, len(checks))
+	results := make([][]ComponentStatus, len(checks))
 	var wg sync.WaitGroup
 	for i, c := range checks {
 		wg.Add(1)
@@ -183,27 +190,34 @@ func (e *Engine) runChecks(ctx context.Context, checks []Check) map[string][]Com
 	wg.Wait()
 
 	for i, c := range checks {
-		out[c.Name] = append(out[c.Name], results[i])
+		if len(results[i]) == 0 {
+			continue
+		}
+		out[c.Name] = append(out[c.Name], results[i]...)
 	}
 	return out
 }
 
 // runOne is the per-check execution path. It wraps parentCtx with a
 // per-check deadline when c.Timeout is positive, invokes c.Run, and
-// packages the Result into a ComponentStatus carrying the Check's
-// component metadata, the current timestamp, and any diagnostics from
-// the Result.
+// converts each returned Result into a ComponentStatus carrying the
+// Check's component metadata, the current timestamp, and any
+// diagnostics from the Result.
 //
 // runOne defends against two misuse modes. First, when c.Run is nil,
-// runOne returns a failing ComponentStatus with a descriptive Output
-// rather than dereferencing the nil function value, so a half-built
-// Check cannot crash the process. Second, when the resulting Status is
-// StatusPass, runOne clears the Output field unconditionally so the
-// per-component "output" key disappears from the serialized response,
-// honoring the RFC requirement that diagnostic output be omitted from
-// passing components. A misbehaving check producer that returns
-// Output even on success cannot leak that text to the client.
-func (e *Engine) runOne(parentCtx context.Context, c Check) ComponentStatus {
+// runOne returns a single failing ComponentStatus with a descriptive
+// Output rather than dereferencing the nil function value, so a
+// half-built Check cannot crash the process. Second, when an
+// observation's Status is StatusPass, runOne clears the Output and
+// AffectedEndpoints fields unconditionally so the corresponding keys
+// disappear from the serialized response, honoring RFC §3.5, §4.6, and
+// §4.8. A misbehaving check producer that returns these fields even on
+// success cannot leak them to the client.
+//
+// An empty slice from c.Run is propagated as an empty slice, allowing
+// runChecks to omit the Check from the response entirely. This is the
+// correct shape for "the check ran but had nothing to report".
+func (e *Engine) runOne(parentCtx context.Context, c Check) []ComponentStatus {
 	ctx := parentCtx
 	if c.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -211,23 +225,34 @@ func (e *Engine) runOne(parentCtx context.Context, c Check) ComponentStatus {
 		defer cancel()
 	}
 
-	r := Result{Status: StatusFail, Output: "check has no Run function"}
-	if c.Run != nil {
-		r = c.Run(ctx)
+	var results []Result
+	if c.Run == nil {
+		results = []Result{{Status: StatusFail, Output: "check has no Run function"}}
+	} else {
+		results = c.Run(ctx)
 	}
 
-	cs := ComponentStatus{
-		ComponentType: c.ComponentType,
-		Status:        r.Status,
-		ObservedValue: r.ObservedValue,
-		ObservedUnit:  r.ObservedUnit,
-		Time:          time.Now().UTC().Format(time.RFC3339Nano),
-		Output:        r.Output,
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	out := make([]ComponentStatus, 0, len(results))
+	for _, r := range results {
+		cs := ComponentStatus{
+			ComponentId:       r.ComponentId,
+			ComponentType:     c.ComponentType,
+			Status:            r.Status,
+			ObservedValue:     r.ObservedValue,
+			ObservedUnit:      r.ObservedUnit,
+			Time:              now,
+			Output:            r.Output,
+			AffectedEndpoints: r.AffectedEndpoints,
+			Links:             r.Links,
+		}
+		if cs.Status == StatusPass {
+			cs.Output = ""
+			cs.AffectedEndpoints = nil
+		}
+		out = append(out, cs)
 	}
-	if cs.Status == StatusPass {
-		cs.Output = ""
-	}
-	return cs
+	return out
 }
 
 // aggregate reduces a checks map to a single overall Status using the
