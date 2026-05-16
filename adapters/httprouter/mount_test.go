@@ -21,11 +21,11 @@ func TestMount_registersAllThreeEndpoints(t *testing.T) {
 	eng := core.NewEngine("svc", "desc")
 	eng.RegisterReadyCheck(core.Check{
 		Name: "critical", ComponentType: "datastore",
-		Run: func(ctx context.Context) core.Result { return core.Result{Status: core.StatusPass} },
+		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
 	eng.RegisterCheck(core.Check{
 		Name: "informational", ComponentType: "datastore",
-		Run: func(ctx context.Context) core.Result { return core.Result{Status: core.StatusPass} },
+		Run: func(ctx context.Context) []core.Result { return []core.Result{{Status: core.StatusPass}} },
 	})
 
 	router := httprouter.New()
@@ -72,8 +72,8 @@ func TestMount_readyzFailReturns503(t *testing.T) {
 	eng := core.NewEngine("svc", "desc")
 	eng.RegisterReadyCheck(core.Check{
 		Name: "critical", ComponentType: "datastore",
-		Run: func(ctx context.Context) core.Result {
-			return core.Result{Status: core.StatusFail, Output: "down"}
+		Run: func(ctx context.Context) []core.Result {
+			return []core.Result{{Status: core.StatusFail, Output: "down"}}
 		},
 	})
 

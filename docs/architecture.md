@@ -98,11 +98,25 @@ Why it exists: it gives every response at least one entry, which means clients c
 
 Why it panics on collision: silent overwrite would be a debugging trap. A panic at registration time is loud and immediate.
 
-### Output suppression on pass
+### Output and AffectedEndpoints suppression on pass
 
-When `Result.Status == StatusPass`, the engine zeros `ComponentStatus.Output` before serialization. Combined with `json:"output,omitempty"`, this guarantees `output` is absent from the JSON for passing checks.
+When `Result.Status == StatusPass`, the engine zeros both `ComponentStatus.Output` and `ComponentStatus.AffectedEndpoints` before serialization. Combined with `omitempty` JSON tags, this guarantees those keys are absent from the JSON for passing observations.
 
-The motivation is the RFC's §3.5 / §4.8 rules ("SHOULD be omitted on pass") and a defensive concern: a check that returns a stale `Output` from a successful retry should not leak that string to the client. Future maintainers must preserve this rule when adding new fields that mirror it (e.g. `AffectedEndpoints` per RFC §4.6).
+The motivation is RFC §3.5, §4.6, and §4.8 ("SHOULD be omitted on pass") and a defensive concern: an observation that returns stale diagnostics from a successful retry should not leak them to the client. Future maintainers must preserve this rule when adding new fields with the same RFC suppression semantics.
+
+### `Check.Run` returns a slice
+
+RFC §4 keys each check entry to an array of sub-component objects, supporting the multi-replica case directly (the Cassandra cluster in the spec's §5 example reports one entry per node). `Check.Run` therefore returns `[]Result` rather than a single `Result`.
+
+A single-instance dependency (a primary database, one S3 bucket) returns a one-element slice. A replicated dependency fans out internally and returns one `Result` per replica, each with its own `ComponentId`. The engine flattens all results from one Check under that Check's `Name` key in the response map.
+
+Trade-offs:
+
+- A single `Check.Timeout` bounds the entire fan-out, not each replica individually. Within `Run`, the producer is responsible for honoring `ctx.Done()` across whatever per-replica calls it issues.
+- A `Run` returning an empty slice means "the check has nothing to report" and the engine omits the key from the response entirely. This is the correct shape for checks whose target population can legitimately be empty (zero-replica services), and is preferable to forcing a sentinel "no replicas" entry.
+- `nil Run` still surfaces as a single failing entry with a descriptive `Output`, so a half-built `Check` cannot crash the engine.
+
+Why not two methods (single-result `Run` and multi-result `RunAll`)? Two function fields would double the API surface and force every producer and adapter to handle both shapes. The slice-only form is uniform: a single-instance check writes `return []Result{{...}}` (a small ergonomic cost) and gets the same semantics as a fan-out check.
 
 ### Subpackage layout matches the (now-realized) module structure
 

@@ -79,12 +79,12 @@ func newWithHeader(h bucketHeader, bucket string) core.Check {
 		Name:          DefaultName,
 		ComponentType: DefaultComponentType,
 		Timeout:       DefaultTimeout,
-		Run: func(ctx context.Context) core.Result {
+		Run: func(ctx context.Context) []core.Result {
 			_, err := h.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 			if err != nil {
-				return core.Result{Status: core.StatusFail, Output: err.Error()}
+				return []core.Result{{Status: core.StatusFail, Output: err.Error()}}
 			}
-			return core.Result{Status: core.StatusPass}
+			return []core.Result{{Status: core.StatusPass}}
 		},
 	}
 }

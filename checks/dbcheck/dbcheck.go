@@ -68,11 +68,11 @@ func New(p Pinger) core.Check {
 		Name:          DefaultName,
 		ComponentType: DefaultComponentType,
 		Timeout:       DefaultTimeout,
-		Run: func(ctx context.Context) core.Result {
+		Run: func(ctx context.Context) []core.Result {
 			if err := p.PingContext(ctx); err != nil {
-				return core.Result{Status: core.StatusFail, Output: err.Error()}
+				return []core.Result{{Status: core.StatusFail, Output: err.Error()}}
 			}
-			return core.Result{Status: core.StatusPass}
+			return []core.Result{{Status: core.StatusPass}}
 		},
 	}
 }

@@ -139,36 +139,60 @@ eng.RegisterReadyCheck(core.Check{
     Name:          "queue:depth",
     ComponentType: "datastore",
     Timeout:       2 * time.Second,
-    Run: func(ctx context.Context) core.Result {
+    Run: func(ctx context.Context) []core.Result {
         depth, err := queue.Depth(ctx)
         if err != nil {
-            return core.Result{Status: core.StatusFail, Output: err.Error()}
+            return []core.Result{{Status: core.StatusFail, Output: err.Error()}}
         }
         if depth > 10_000 {
-            return core.Result{
+            return []core.Result{{
                 Status:        core.StatusWarn,
                 ObservedValue: depth,
                 ObservedUnit:  "messages",
                 Output:        "queue depth above warning threshold",
-            }
+            }}
         }
-        return core.Result{
+        return []core.Result{{
             Status:        core.StatusPass,
             ObservedValue: depth,
             ObservedUnit:  "messages",
-        }
+        }}
     },
 })
 ```
 
+`Run` returns a slice because RFC §4 allows a single check key to report multiple sub-component instances. A replicated dependency (a Cassandra cluster, a Redis sentinel set) returns one `Result` per node, each with its own `ComponentId`:
+
+```go
+eng.RegisterReadyCheck(core.Check{
+    Name:          "cassandra:connections",
+    ComponentType: "datastore",
+    Run: func(ctx context.Context) []core.Result {
+        nodes := cluster.Nodes()
+        out := make([]core.Result, 0, len(nodes))
+        for _, n := range nodes {
+            out = append(out, core.Result{
+                ComponentId:   n.ID,
+                Status:        n.HealthStatus(),
+                ObservedValue: n.OpenConnections(),
+                ObservedUnit:  "connections",
+            })
+        }
+        return out
+    },
+})
+```
+
+Single-instance checks return a one-element slice. Returning `nil` or an empty slice means "the check has nothing to report" and the key is omitted from the response entirely.
+
 Conventions worth knowing:
 
-- Per-check timeout is applied by the engine. Your `Run` receives a `context.Context` already bounded by `Check.Timeout`, so do not wrap it again.
-- Checks run in parallel. The engine waits for all of them before responding; there is no fail-fast.
-- Status aggregation is uniform across endpoints: any `fail` → top-level `fail`; else any `warn` → `warn`; else `pass`.
+- Per-check timeout is applied by the engine. Your `Run` receives a `context.Context` already bounded by `Check.Timeout`, so do not wrap it again. The timeout bounds the whole slice of observations, not each one individually.
+- Checks run in parallel. The engine waits for all of them before responding; there is no fail-fast. Within a single multi-replica `Run`, you are responsible for fanning out across replicas.
+- Status aggregation is uniform across endpoints and across sub-components: any `fail` → top-level `fail`; else any `warn` → `warn`; else `pass`. Each sub-component contributes independently.
 - `Register*` takes a value copy. Mutating the original `Check` after registration is a no-op.
 - The name `system:time` is reserved. Registering it panics.
-- On `pass`, the engine zeroes `Output` before serialization so a stale diagnostic from a successful check never leaks to the client.
+- On `pass`, the engine zeroes `Output` and `AffectedEndpoints` before serialization so stale diagnostics from a successful observation never leak to the client (RFC §3.5, §4.6, §4.8).
 
 ## HTTP adapters
 

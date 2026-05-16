@@ -5,34 +5,49 @@ import (
 	"time"
 )
 
-// Result is what a Check.Run produces when it has finished inspecting
-// whatever component the check is responsible for. It is intentionally
-// minimal: the caller produces the status and optional diagnostics, and
-// the Engine fills in metadata such as time, component type, and the
-// per-check Name when assembling the response payload.
+// Result is what a single observation produced by a Check.Run looks
+// like. A Check may report one observation (the common case, for a
+// single-instance dependency such as a primary database) or several
+// (for a replicated dependency, such as a Cassandra cluster with N
+// nodes), so Check.Run returns a slice of Result values. The Engine
+// fills in metadata such as time and the per-check ComponentType when
+// assembling the response payload.
 //
 // Output carries free-form diagnostic text for fail or warn results.
 // Concrete check producers typically set Output to the underlying
 // error's message. The Engine guarantees that Output is cleared before
 // serialization whenever Status is StatusPass, so callers do not need
-// to defend against the case where a successful check accidentally
-// returns a stale Output value.
+// to defend against the case where a successful observation accidentally
+// returns a stale Output value. The same suppression applies to
+// AffectedEndpoints, in accordance with RFC §4.6.
 //
 // ObservedValue and ObservedUnit are optional and may be left zero.
-// They are intended for quantitative checks (for example, current
+// They are intended for quantitative observations (for example, current
 // connection count or response time in milliseconds) where the consumer
 // of the health response wants to graph the value over time.
+//
+// ComponentId, Links, and AffectedEndpoints are optional and exist so
+// that a multi-replica Check can produce one Result per replica with
+// enough detail to distinguish them in the serialized response, as
+// described in RFC §4.
 type Result struct {
-	// Status is the outcome of running the check. It must be one of
-	// StatusPass, StatusWarn, or StatusFail. The Engine aggregates these
-	// per-check statuses into the overall response status using strict
-	// rules: any fail wins, then any warn, otherwise pass.
+	// ComponentId is the unique identifier of the specific instance of
+	// the sub-component this Result represents. Set this when a Check
+	// produces more than one Result so consumers can distinguish the
+	// replicas. Leave empty for single-instance checks.
+	ComponentId string
+
+	// Status is the outcome of the observation. It must be one of
+	// StatusPass, StatusWarn, or StatusFail. The Engine aggregates the
+	// per-observation statuses into the overall response status using
+	// strict rules: any fail wins, then any warn, otherwise pass.
 	Status Status
 
-	// ObservedValue holds a measured datum for quantitative checks. It
-	// may be any JSON-encodable value (string, number, boolean, object,
-	// or array). Leave it nil for binary checks where only the Status
-	// matters, such as a database ping that either succeeds or fails.
+	// ObservedValue holds a measured datum for quantitative
+	// observations. It may be any JSON-encodable value (string, number,
+	// boolean, object, or array). Leave it nil for binary checks where
+	// only the Status matters, such as a database ping that either
+	// succeeds or fails.
 	ObservedValue any
 
 	// ObservedUnit clarifies the unit of measurement for ObservedValue,
@@ -44,9 +59,21 @@ type Result struct {
 	// Output is raw diagnostic text describing a fail or warn condition.
 	// Concrete check producers typically populate this with the
 	// underlying error's message. The Engine omits Output from the
-	// serialized response when Status is StatusPass, so a check that
-	// successfully completed never leaks an Output value to the client.
+	// serialized response when Status is StatusPass, so an observation
+	// that successfully completed never leaks an Output value to the
+	// client.
 	Output string
+
+	// AffectedEndpoints is a list of URI templates for endpoints that
+	// are affected by issues with this sub-component. Per RFC §4.6, this
+	// list SHOULD be omitted when Status is StatusPass; the Engine
+	// enforces that suppression automatically.
+	AffectedEndpoints []string
+
+	// Links is a map of link relation names to URIs pointing at more
+	// information about this specific sub-component, for example a
+	// per-node Grafana dashboard or a runbook page.
+	Links map[string]string
 }
 
 // Check is the unit of registration with the Engine. Construct one
@@ -96,12 +123,25 @@ type Check struct {
 	Timeout time.Duration
 
 	// Run is the function that actually inspects the component and
-	// produces a Result. It receives a context that already carries any
-	// Timeout configured on the Check, so Run should not wrap the
-	// context with another timeout of its own. Run must not block past
-	// ctx.Done(), and it must not panic. A nil Run is treated by the
-	// Engine as a failed check with a descriptive Output.
-	Run func(ctx context.Context) Result
+	// produces one Result per sub-component instance. A single-instance
+	// dependency (a primary database, a single S3 bucket) returns a
+	// one-element slice. A replicated dependency (a Cassandra cluster
+	// with N nodes) returns one Result per replica, each carrying its
+	// own ComponentId so consumers can distinguish them in the response.
+	//
+	// Run receives a context that already carries any Timeout configured
+	// on the Check, so Run should not wrap the context with another
+	// timeout of its own. The Timeout bounds the entire slice of
+	// observations, not each one individually; when Run fans out across
+	// replicas internally, it remains responsible for honoring ctx.Done()
+	// across all of them. Run must not block past ctx.Done(), and it
+	// must not panic.
+	//
+	// A nil Run is treated by the Engine as a single failing observation
+	// with a descriptive Output. Returning an empty slice from Run is
+	// allowed and is interpreted as "nothing to report for this check";
+	// the Engine then omits the Check's key from the response entirely.
+	Run func(ctx context.Context) []Result
 }
 
 // ComponentStatus is the per-component object that appears inside the
