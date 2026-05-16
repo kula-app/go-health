@@ -81,8 +81,14 @@ type nodePinger interface {
 // the interface is unexported and exists for testability: the package's
 // own tests provide a fake iterator that synthesises any number of
 // node states without a real cluster.
+//
+// The returned error covers cluster-level failures that prevent the
+// callback from being invoked at all, the most common being a topology
+// discovery failure where go-redis cannot reach any seed node. A nil
+// error with zero callback invocations is a legitimate "no shards
+// configured" state and is distinct from a discovery failure.
 type shardIterator interface {
-	forEach(ctx context.Context, fn func(p nodePinger))
+	forEach(ctx context.Context, fn func(p nodePinger)) error
 }
 
 // realPinger adapts a concrete *redis.Client to the nodePinger
@@ -114,13 +120,15 @@ type clusterShardIterator struct {
 	c *redis.ClusterClient
 }
 
-// forEach invokes fn for every node in the cluster. ForEachShard's
-// callback signature requires returning an error, but this iterator
-// always returns nil so that one unreachable node does not abort the
-// iteration over its siblings: collecting status from every node is
-// the whole point of the multi-result fan-out.
-func (i *clusterShardIterator) forEach(ctx context.Context, fn func(p nodePinger)) {
-	_ = i.c.ForEachShard(ctx, func(ctx context.Context, n *redis.Client) error {
+// forEach invokes fn for every node in the cluster and returns any
+// cluster-level error from go-redis. The inner callback always returns
+// nil so that one unreachable node does not abort the iteration over
+// its siblings: collecting status from every node is the whole point
+// of the multi-result fan-out. The outer error captures failures that
+// prevent the callback from ever running, primarily topology
+// discovery failure when no seed node is reachable.
+func (i *clusterShardIterator) forEach(ctx context.Context, fn func(p nodePinger)) error {
+	return i.c.ForEachShard(ctx, func(ctx context.Context, n *redis.Client) error {
 		fn(&realPinger{c: n})
 		return nil
 	})
@@ -190,6 +198,20 @@ func NewCluster(client *redis.ClusterClient) core.Check {
 // stub shardIterator that synthesizes an arbitrary number of node
 // states without standing up a real Redis Cluster. Production callers
 // always reach this through NewCluster.
+//
+// When the iterator reports a cluster-level error and yielded no
+// nodes, newWithIterator synthesizes a single failing Result so the
+// failure is visible in the response. Without this, a topology
+// discovery failure (no seed nodes reachable, auth refused at the
+// cluster gateway) would silently return an empty slice, which the
+// engine interprets as "nothing to report" and omits from the
+// response entirely — making a completely unreachable cluster
+// indistinguishable from a healthy zero-shard configuration.
+//
+// When the iterator yielded at least one node, the per-node Results
+// are returned unchanged and any iterator error is dropped, because
+// per-node detail is more useful than a summary error and the
+// per-node failures already aggregate to the right overall status.
 func newWithIterator(it shardIterator) core.Check {
 	return core.Check{
 		Name:          DefaultName,
@@ -200,12 +222,18 @@ func newWithIterator(it shardIterator) core.Check {
 				mu  sync.Mutex
 				out []core.Result
 			)
-			it.forEach(ctx, func(p nodePinger) {
+			err := it.forEach(ctx, func(p nodePinger) {
 				r := pingNode(ctx, p)
 				mu.Lock()
 				out = append(out, r)
 				mu.Unlock()
 			})
+			if err != nil && len(out) == 0 {
+				out = append(out, core.Result{
+					Status: core.StatusFail,
+					Output: err.Error(),
+				})
+			}
 			return out
 		},
 	}

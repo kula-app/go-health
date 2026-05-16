@@ -103,18 +103,21 @@ func TestRun_timeoutDeadlineExceeded(t *testing.T) {
 // stubShardIterator implements shardIterator for tests. It yields the
 // configured nodes to the callback, optionally in parallel to match
 // ForEachShard's real-world concurrent fan-out so the race detector
-// has something to look at.
+// has something to look at. The optional err field models the
+// cluster-level error a real ForEachShard returns when topology
+// discovery fails before any callback can run.
 type stubShardIterator struct {
 	nodes    []nodePinger
 	parallel bool
+	err      error
 }
 
-func (s *stubShardIterator) forEach(ctx context.Context, fn func(p nodePinger)) {
+func (s *stubShardIterator) forEach(ctx context.Context, fn func(p nodePinger)) error {
 	if !s.parallel {
 		for _, n := range s.nodes {
 			fn(n)
 		}
-		return
+		return s.err
 	}
 	var wg sync.WaitGroup
 	for _, n := range s.nodes {
@@ -125,6 +128,7 @@ func (s *stubShardIterator) forEach(ctx context.Context, fn func(p nodePinger)) 
 		}(n)
 	}
 	wg.Wait()
+	return s.err
 }
 
 func TestNewCluster_defaults(t *testing.T) {
@@ -185,16 +189,63 @@ func TestCluster_multipleNodes(t *testing.T) {
 }
 
 // TestCluster_emptyCluster verifies that an iterator yielding no nodes
-// produces an empty []Result, which the engine will then interpret as
-// "nothing to report" and omit the check key from the response. This
-// is the correct shape for a cluster with no configured shards (a
-// transient state during topology bootstrap) and is preferable to a
-// synthesised sentinel "no nodes" entry that the engine could not
-// aggregate sensibly.
+// AND reporting no error produces an empty []Result, which the engine
+// interprets as "nothing to report" and omits the check key from the
+// response. This is the correct shape for a cluster with no configured
+// shards (a transient state during topology bootstrap) and is
+// preferable to a synthesised sentinel "no nodes" entry that the
+// engine could not aggregate sensibly.
 func TestCluster_emptyCluster(t *testing.T) {
 	c := newWithIterator(&stubShardIterator{})
 	r := c.Run(context.Background())
 	if len(r) != 0 {
 		t.Errorf("len(r) = %d, want 0", len(r))
+	}
+}
+
+// TestCluster_topologyDiscoveryFailure verifies the discovery-error
+// path: when the iterator returns an error AND yielded no nodes
+// (go-redis's behavior when no seed node is reachable), the check
+// synthesizes a single failing Result with the error message in
+// Output. Without this, a totally unreachable cluster would return an
+// empty slice and the engine would omit the check key entirely,
+// silently aggregating to pass.
+func TestCluster_topologyDiscoveryFailure(t *testing.T) {
+	c := newWithIterator(&stubShardIterator{err: errors.New("no seed reachable")})
+	r := c.Run(context.Background())
+	if len(r) != 1 {
+		t.Fatalf("len(r) = %d, want 1", len(r))
+	}
+	if r[0].Status != core.StatusFail {
+		t.Errorf("Status = %q, want fail", r[0].Status)
+	}
+	if r[0].Output != "no seed reachable" {
+		t.Errorf("Output = %q, want 'no seed reachable'", r[0].Output)
+	}
+	if r[0].ComponentId != "" {
+		t.Errorf("ComponentId = %q, want empty (no node to attribute)", r[0].ComponentId)
+	}
+}
+
+// TestCluster_partialResultsDropError defends against the case where
+// future go-redis behavior surfaces a cluster-level error even after
+// some callbacks ran. Per-node results are more useful than a summary
+// error message, and per-node failures already aggregate to the
+// correct overall status, so the iterator error is intentionally
+// dropped when at least one node was observed.
+func TestCluster_partialResultsDropError(t *testing.T) {
+	c := newWithIterator(&stubShardIterator{
+		nodes: []nodePinger{&stubPinger{addr: "10.0.0.1:6379"}},
+		err:   errors.New("partial failure"),
+	})
+	r := c.Run(context.Background())
+	if len(r) != 1 {
+		t.Fatalf("len(r) = %d, want 1 (the one yielded node)", len(r))
+	}
+	if r[0].ComponentId != "10.0.0.1:6379" {
+		t.Errorf("ComponentId = %q, want 10.0.0.1:6379", r[0].ComponentId)
+	}
+	if r[0].Status != core.StatusPass {
+		t.Errorf("Status = %q, want pass (the iterator error must not bleed into the per-node Result)", r[0].Status)
 	}
 }
