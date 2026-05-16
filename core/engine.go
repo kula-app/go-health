@@ -9,9 +9,10 @@ import (
 
 // Engine registers checks and produces HealthResponse values on demand.
 // Construct one per service using NewEngine, register checks with
-// RegisterCheck or RegisterReadyCheck, then expose its Run methods
-// through whatever transport adapter your service uses, typically the
-// HTTP adapter in the adapters/http subpackage.
+// RegisterHealthCheck, RegisterReadinessCheck, or RegisterLivenessCheck,
+// then expose its Run methods through whatever transport adapter your
+// service uses, typically the HTTP adapter in the adapters/http
+// subpackage.
 //
 // An Engine is safe for concurrent calls to the Run methods after
 // registration is complete. The Engine is not safe for concurrent
@@ -23,8 +24,9 @@ type Engine struct {
 	serviceID   string
 	description string
 	logger      *slog.Logger
-	healthz     []Check // every check the consumer has registered; runs on /healthz
-	readyz      []Check // the critical subset; runs on /readyz and /healthz
+	livez       []Check // liveness checks; run on /livez, /readyz, and /healthz
+	readyz      []Check // readiness + liveness; run on /readyz and /healthz
+	healthz     []Check // every registered check; runs on /healthz
 }
 
 // systemTimeCheckName is the reserved key the Engine uses for its
@@ -47,8 +49,9 @@ const systemTimeCheckName = "system:time"
 // warn-level and error-level health events use the same logger as the
 // rest of your service.
 //
-// The returned Engine has no checks registered. Call RegisterCheck and
-// RegisterReadyCheck to populate it before exposing the Run methods.
+// The returned Engine has no checks registered. Call
+// RegisterHealthCheck, RegisterReadinessCheck, or RegisterLivenessCheck
+// to populate it before exposing the Run methods.
 func NewEngine(serviceID, description string, opts ...Option) *Engine {
 	e := &Engine{
 		serviceID:   serviceID,
@@ -61,46 +64,48 @@ func NewEngine(serviceID, description string, opts ...Option) *Engine {
 	return e
 }
 
-// RegisterCheck adds c to the dashboard-only set, meaning c runs on
-// RunHealthz but not on RunReadyz. Use this method for checks that are
-// useful for human operators looking at the dashboard but that should
-// not gate traffic when they fail, for example a storage round-trip
-// against an S3 bucket where the service can still serve most
-// endpoints even when storage is unhealthy.
+// RegisterHealthCheck adds c to the dashboard-only set, meaning c runs
+// on RunHealthz but not on RunReadyz or RunLivez. Use this method for
+// checks that are useful for human operators looking at the dashboard
+// but that should not gate traffic when they fail, for example a
+// storage round-trip against an S3 bucket where the service can still
+// serve most endpoints even when storage is unhealthy.
 //
 // The Engine takes a value copy of c. Mutating the local Check after
-// calling RegisterCheck has no effect on what the Engine holds, which
-// is why mutating c.Timeout or c.Name to override producer defaults
-// must happen before this call.
+// calling RegisterHealthCheck has no effect on what the Engine holds,
+// which is why mutating c.Timeout or c.Name to override producer
+// defaults must happen before this call.
 //
-// RegisterCheck panics when c.Name equals the reserved value
+// RegisterHealthCheck panics when c.Name equals the reserved value
 // "system:time", because that key is owned by the framework. Use any
 // other name. The panic is a hard programmer error rather than a
 // returned sentinel because misuse would silently corrupt the
 // response shape, and surfacing it at startup is safer than letting
 // it slip into production.
 //
-// RegisterCheck is not safe to call concurrently with itself, with
-// RegisterReadyCheck, or with the Engine's Run methods. Register
-// every check during process startup, before exposing the engine.
-func (e *Engine) RegisterCheck(c Check) {
+// RegisterHealthCheck is not safe to call concurrently with itself,
+// with the other Register methods, or with the Engine's Run methods.
+// Register every check during process startup, before exposing the
+// engine.
+func (e *Engine) RegisterHealthCheck(c Check) {
 	if c.Name == systemTimeCheckName {
 		panic(`health/core: check name "system:time" is reserved by the framework`)
 	}
 	e.healthz = append(e.healthz, c)
 }
 
-// RegisterReadyCheck adds c to both the readiness set and the dashboard
-// set, meaning c runs on RunReadyz and on RunHealthz. Use this method
-// for checks that must succeed for the service to accept traffic, for
-// example a database ping where every endpoint depends on the database.
-// A fail Result from c will make RunReadyz produce a response with
-// StatusFail, which the HTTP adapter maps to a 503, which in turn
-// signals kubelet to drop the pod from the Service endpoints.
+// RegisterReadinessCheck adds c to the readiness set, meaning c runs on
+// RunReadyz and on RunHealthz. Use this method for checks that must
+// succeed for the service to accept traffic, for example a database
+// ping where every endpoint depends on the database. A fail Result
+// from c will make RunReadyz produce a response with StatusFail, which
+// the HTTP adapter maps to a 503, which in turn signals kubelet to
+// drop the pod from the Service endpoints.
 //
-// The same value-copy semantics and concurrency rules as RegisterCheck
-// apply. RegisterReadyCheck also panics when c.Name equals "system:time".
-func (e *Engine) RegisterReadyCheck(c Check) {
+// The same value-copy semantics and concurrency rules as
+// RegisterHealthCheck apply. RegisterReadinessCheck also panics when
+// c.Name equals "system:time".
+func (e *Engine) RegisterReadinessCheck(c Check) {
 	if c.Name == systemTimeCheckName {
 		panic(`health/core: check name "system:time" is reserved by the framework`)
 	}
@@ -108,29 +113,62 @@ func (e *Engine) RegisterReadyCheck(c Check) {
 	e.readyz = append(e.readyz, c)
 }
 
-// RunLivez returns a HealthResponse that reports only the framework's
-// implicit "system:time" entry. No registered checks are executed.
-// Status is always StatusPass.
+// RegisterLivenessCheck adds c to the liveness set, meaning c runs on
+// RunLivez, RunReadyz, and RunHealthz. A failing liveness check will
+// make RunLivez produce a response with StatusFail, which the HTTP
+// adapter maps to a 503, which in turn signals kubelet to restart the
+// pod.
+//
+// WARNING: liveness probe failure restarts the pod. Use this method
+// only for in-process signals that a restart can actually fix, for
+// example a deadlock detector, a goroutine-leak watchdog, or a corrupt
+// internal cache. Do NOT register checks here that depend on external
+// I/O (databases, object stores, third-party APIs): a transient
+// downstream blip will then cascade into a synchronized restart of
+// every replica, turning a degraded downstream into a self-inflicted
+// outage. Register external-dependency checks with
+// RegisterReadinessCheck instead, which only drains traffic from the
+// affected replica rather than restarting it. When in doubt, prefer
+// RegisterReadinessCheck.
+//
+// The same value-copy semantics and concurrency rules as
+// RegisterHealthCheck apply. RegisterLivenessCheck also panics when
+// c.Name equals "system:time".
+func (e *Engine) RegisterLivenessCheck(c Check) {
+	if c.Name == systemTimeCheckName {
+		panic(`health/core: check name "system:time" is reserved by the framework`)
+	}
+	e.healthz = append(e.healthz, c)
+	e.readyz = append(e.readyz, c)
+	e.livez = append(e.livez, c)
+}
+
+// RunLivez executes every Check registered with RegisterLivenessCheck
+// and returns the aggregated HealthResponse. The framework's implicit
+// "system:time" entry is always present in the response. When no
+// liveness checks have been registered, the response reports only that
+// implicit entry and Status is StatusPass, which is the right default
+// for liveness ("the process is alive enough to answer this probe").
 //
 // This is the response that the HTTP adapter's LivezHandler serializes
-// to kubelet's liveness probe. The contract that liveness must honor is
-// "is this process alive enough to make forward progress at all", which
-// is answered by the fact that this function returned at all. Running
-// any external dependency check here would risk restarting the pod on
-// transient downstream issues, so the function intentionally ignores
-// everything that has been registered with RegisterCheck or
-// RegisterReadyCheck.
+// for kubelet's liveness probe. A failing liveness check produces a
+// 503, which causes kubelet to restart the pod. Liveness checks
+// therefore must be reserved for in-process signals that a restart can
+// fix; see the warning on RegisterLivenessCheck for the cascade-restart
+// risk of registering external-dependency checks here.
 //
-// The ctx argument is accepted for symmetry with the other Run methods,
-// but RunLivez does not perform I/O so the context is not consulted.
+// RunLivez emits a warn-level log entry when the aggregated status is
+// StatusWarn and an error-level entry when it is StatusFail, both via
+// the Engine's configured logger.
 func (e *Engine) RunLivez(ctx context.Context) HealthResponse {
+	checks := e.runChecks(ctx, e.livez)
+	status := aggregate(checks)
+	e.emitLog(ctx, "liveness", status, len(e.livez))
 	return HealthResponse{
-		Status:      StatusPass,
+		Status:      status,
 		ServiceId:   e.serviceID,
 		Description: e.description,
-		Checks: map[string][]ComponentStatus{
-			systemTimeCheckName: {e.systemTimeStatus()},
-		},
+		Checks:      checks,
 	}
 }
 
@@ -282,11 +320,12 @@ func aggregate(checks map[string][]ComponentStatus) Status {
 }
 
 // RunReadyz executes every Check that was registered with
-// RegisterReadyCheck and returns the aggregated HealthResponse. The
-// response status is StatusFail when any one of those checks failed,
-// StatusWarn when at least one warned (and none failed), and
-// StatusPass when every check passed. The framework's implicit
-// "system:time" entry is always present in the response.
+// RegisterReadinessCheck or RegisterLivenessCheck and returns the
+// aggregated HealthResponse. The response status is StatusFail when
+// any one of those checks failed, StatusWarn when at least one warned
+// (and none failed), and StatusPass when every check passed. The
+// framework's implicit "system:time" entry is always present in the
+// response.
 //
 // This is the response that the HTTP adapter's ReadyzHandler
 // serializes for kubelet's readiness probe. A 503 response causes
@@ -311,10 +350,11 @@ func (e *Engine) RunReadyz(ctx context.Context) HealthResponse {
 	}
 }
 
-// RunHealthz executes every registered check, whether registered via
-// RegisterCheck or RegisterReadyCheck, and returns the aggregated
-// HealthResponse. The aggregation rule is identical to RunReadyz, but
-// the set of checks executed is the superset.
+// RunHealthz executes every registered check, regardless of whether it
+// was registered via RegisterHealthCheck, RegisterReadinessCheck, or
+// RegisterLivenessCheck, and returns the aggregated HealthResponse. The
+// aggregation rule is identical to RunReadyz, but the set of checks
+// executed is the superset.
 //
 // This is the response that the HTTP adapter's HealthzHandler
 // serializes. It is intended for human operators and dashboards rather
