@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "automerge": false,
+  "extends": [
+    "config:recommended"
+  ],
+  "keepUpdatedLabel": "renovate:keep-updated",
+  "lockFileMaintenance": {
+    "automerge": false,
+    "enabled": true,
+    "extends": [
+      "schedule:weekly"
+    ]
+  },
+  "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "description": "Group Go toolchain updates (golang Docker image + go directive in go.mod) into a single PR",
+      "groupName": "go toolchain",
+      "matchDatasources": [
+        "docker",
+        "golang-version"
+      ],
+      "matchDepNames": [
+        "go",
+        "golang"
+      ]
+    }
+  ],
+  "postUpdateOptions": [
+    "gomodTidy",
+    "gomodUpdateImportPaths"
+  ],
+  "rebaseLabel": "renovate:rebase",
+  "stopUpdatingLabel": "renovate:disabled",
+  "timezone": "Europe/Vienna"
+}
