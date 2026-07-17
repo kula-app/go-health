@@ -1,6 +1,6 @@
 module github.com/kula-app/go-health
 
-go 1.26.4
+go 1.26.5
 
 tool (
 	golang.org/x/vuln/cmd/govulncheck
