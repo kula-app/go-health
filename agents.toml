@@ -1,5 +1,5 @@
 version = 1
-agents = ["claude", "codex", "cursor"]
+agents = ["claude", "codex", "cursor", "pi"]
 
 [trust]
 github_orgs = ["kula-app", "philprime"]
