@@ -146,6 +146,7 @@ format:
 .PHONY: upgrade-deps
 upgrade-deps:
 	go get -u ./...
+	go get -u tool
 	$(MAKE) format
 
 # ============================================================================
